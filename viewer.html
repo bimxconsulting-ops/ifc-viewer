@@ -5,206 +5,175 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { width:100%; height:100%; overflow:hidden; background:#eaecef; }
-#cv { width:100%; height:100%; }
-#err { position:absolute;top:10px;left:10px;right:10px;background:rgba(200,0,0,.85);color:#fff;
-        padding:8px;font-size:11px;font-family:monospace;border-radius:4px;display:none;z-index:99; }
+#cv { width:100%; height:100%; display:block; }
 </style>
 </head>
 <body>
 <canvas id="cv"></canvas>
-<div id="err"></div>
-<script src="https://bimxconsulting-ops.github.io/ifc-viewer/xeokit-sdk.bundle.js" onerror="sendErr('xeokit bundle failed to load')"></script>
+<script src="https://bimxconsulting-ops.github.io/ifc-viewer/xeokit-sdk.bundle.js" onerror="parent.postMessage({type:'error',msg:'Bundle nicht geladen'},'*')"></script>
 <script>
-// ── helpers ─────────────────────────────────────────────────────────
 function sendErr(msg) {
-  console.error('[viewer]', msg);
-  document.getElementById('err').style.display='block';
-  document.getElementById('err').textContent = '3D-Fehler: '+msg;
-  window.parent.postMessage({type:'error', msg:msg}, '*');
+  parent.postMessage({type:'error', msg:String(msg)}, '*');
 }
-function sendLog(msg) {
-  window.parent.postMessage({type:'viewerLog', msg:msg}, '*');
+function dbg(msg) {
+  parent.postMessage({type:'viewerLog', msg:String(msg)}, '*');
 }
 
-// ── init ─────────────────────────────────────────────────────────────
-try {
-  if(typeof XeokitSDK === 'undefined') throw new Error('Bundle nicht geladen');
-  
-  const { Viewer, WebIFCLoaderPlugin, DirLight, AmbientLight, SectionPlanesPlugin } = XeokitSDK;
-  
-  if(!Viewer) throw new Error('Viewer nicht in Bundle');
-  if(!WebIFCLoaderPlugin) throw new Error('WebIFCLoaderPlugin nicht in Bundle');
+// Wait for layout to be ready before init
+window.addEventListener('load', function() {
+  try {
+    dbg('XeokitSDK: '+(typeof XeokitSDK));
+    if(typeof XeokitSDK === 'undefined') { sendErr('Bundle nicht geladen'); return; }
+    
+    const Viewer = XeokitSDK.Viewer;
+    const WebIFCLoaderPlugin = XeokitSDK.WebIFCLoaderPlugin;
+    const DirLight = XeokitSDK.DirLight;
+    const AmbientLight = XeokitSDK.AmbientLight;
+    const SectionPlanesPlugin = XeokitSDK.SectionPlanesPlugin;
+    
+    dbg('Viewer type: '+(typeof Viewer));
+    dbg('WebIFCLoaderPlugin type: '+(typeof WebIFCLoaderPlugin));
 
-  const viewer = new Viewer({
-    canvasId: 'cv',
-    transparent: false,
-    backgroundColor: [0.91, 0.92, 0.94]
-  });
+    if(!Viewer) { sendErr('Viewer nicht gefunden'); return; }
+    if(!WebIFCLoaderPlugin) { sendErr('WebIFCLoaderPlugin nicht gefunden'); return; }
 
-  viewer.scene.clearLights();
-  new AmbientLight(viewer.scene, { color:[1,1,1], intensity:0.35 });
-  new DirLight(viewer.scene, { dir:[0.8,-1.0,0.5], color:[1,1,1], intensity:0.8, space:'world' });
-  new DirLight(viewer.scene, { dir:[-0.8,-0.5,-0.5], color:[0.9,0.95,1], intensity:0.4, space:'world' });
+    const cv = document.getElementById('cv');
+    cv.width = window.innerWidth;
+    cv.height = window.innerHeight;
+    dbg('Canvas: '+cv.width+'x'+cv.height);
 
-  viewer.camera.eye  = [20, 15, 20];
-  viewer.camera.look = [0, 0, 0];
-  viewer.camera.up   = [0, 1, 0];
-  viewer.camera.perspective.fov = 52;
+    const viewer = new Viewer({
+      canvasId: 'cv',
+      transparent: false,
+      backgroundColor: [0.91, 0.92, 0.94]
+    });
+    dbg('Viewer OK');
 
-  const sectionPlanes = new SectionPlanesPlugin(viewer, { overviewVisible:false });
-  let activeSectionPlane = null;
+    viewer.scene.clearLights();
+    new AmbientLight(viewer.scene, { color:[1,1,1], intensity:0.35 });
+    new DirLight(viewer.scene, { dir:[0.8,-1.0,0.5], color:[1,1,1], intensity:0.8, space:'world' });
+    new DirLight(viewer.scene, { dir:[-0.8,-0.5,-0.5], color:[0.9,0.95,1], intensity:0.4, space:'world' });
 
-  const ifcLoader = new WebIFCLoaderPlugin(viewer, {
-    wasmPath: 'https://bimxconsulting-ops.github.io/ifc-viewer/'
-  });
+    viewer.camera.eye  = [20, 15, 20];
+    viewer.camera.look = [0, 0, 0];
+    viewer.camera.up   = [0, 1, 0];
 
-  let currentModel = null;
-  sendLog('Viewer init OK');
+    const sectionPlanes = new SectionPlanesPlugin(viewer, { overviewVisible:false });
+    let activeSectionPlane = null;
 
-  // ── IFC type colors ────────────────────────────────────────────────
-  const IFC_COLORS = {
-    IfcWall:[0.82,0.80,0.73,1],IfcWallStandardCase:[0.82,0.80,0.73,1],
-    IfcSlab:[0.69,0.75,0.82,1],IfcRoof:[0.71,0.63,0.58,1],
-    IfcColumn:[0.84,0.68,0.30,1],IfcBeam:[0.74,0.58,0.22,1],
-    IfcMember:[0.70,0.48,0.25,1],IfcDoor:[0.62,0.50,0.33,1],
-    IfcWindow:[0.38,0.68,0.82,0.4],IfcWindowStandardCase:[0.38,0.68,0.82,0.4],
-    IfcCurtainWall:[0.29,0.67,0.79,0.35],IfcPlate:[0.68,0.68,0.68,1],
-    IfcCovering:[0.67,0.65,0.63,1],IfcFurnishingElement:[0.64,0.64,0.64,1],
-    IfcFlowTerminal:[0.44,0.50,0.56,1],IfcSpace:[0.38,0.68,0.82,0.12],
-    IfcBuildingElementProxy:[0.55,0.55,0.55,1],IfcStair:[0.72,0.60,0.50,1],
-    IfcRailing:[0.50,0.50,0.55,1],IfcStairFlight:[0.72,0.60,0.50,1],
-  };
+    const ifcLoader = new WebIFCLoaderPlugin(viewer, {
+      wasmPath: 'https://bimxconsulting-ops.github.io/ifc-viewer/'
+    });
+    dbg('WebIFCLoaderPlugin OK');
 
-  function applyDefaultColors() {
-    for(const [id, entity] of Object.entries(viewer.scene.objects)) {
-      const meta = viewer.metaScene.metaObjects[id];
-      if(!meta) continue;
-      const col = IFC_COLORS[meta.type];
-      if(col) { entity.colorize=col.slice(0,3); entity.opacity=col[3]; }
-    }
-  }
+    let currentModel = null;
 
-  // ── postMessage API ────────────────────────────────────────────────
-  window.addEventListener('message', function(e) {
-    const msg = e.data;
-    if(!msg || !msg.type) return;
-
-    if(msg.type === 'loadIFC') {
-      try {
-        if(!msg.data || msg.data.byteLength === 0) {
-          sendErr('loadIFC: leerer ArrayBuffer');
-          return;
-        }
-        sendLog('Lade IFC: '+msg.data.byteLength+' bytes');
-        
-        if(currentModel) { currentModel.destroy(); currentModel=null; }
-        
-        const blob = new Blob([msg.data], {type:'application/octet-stream'});
-        const url  = URL.createObjectURL(blob);
-
-        currentModel = ifcLoader.load({
-          id: 'model',
-          src: url,
-          loadMetadata: true,
-          objectDefaults: {}
-        });
-
-        currentModel.on('loaded', () => {
-          URL.revokeObjectURL(url);
-          applyDefaultColors();
-          const cnt = Object.keys(viewer.scene.objects).length;
-          sendLog('Geladen: '+cnt+' Objekte');
-          try {
-            viewer.cameraFlight.flyTo({ aabb: viewer.scene.getAABB() }, ()=>{});
-          } catch(fe) { sendLog('flyTo Fehler: '+fe.message); }
-          window.parent.postMessage({
-            type:'loaded',
-            count: cnt
-          }, '*');
-        });
-
-        currentModel.on('error', (err) => {
-          URL.revokeObjectURL(url);
-          sendErr('IFC-Ladefehler: '+String(err));
-        });
-        
-      } catch(err) {
-        sendErr('loadIFC Exception: '+err.message);
+    // ── Colors ────────────────────────────────────────────────────────
+    const C = {
+      IfcWall:[0.82,0.80,0.73,1],IfcWallStandardCase:[0.82,0.80,0.73,1],
+      IfcSlab:[0.69,0.75,0.82,1],IfcRoof:[0.71,0.63,0.58,1],
+      IfcColumn:[0.84,0.68,0.30,1],IfcBeam:[0.74,0.58,0.22,1],
+      IfcMember:[0.70,0.48,0.25,1],IfcDoor:[0.62,0.50,0.33,1],
+      IfcWindow:[0.38,0.68,0.82,0.4],IfcWindowStandardCase:[0.38,0.68,0.82,0.4],
+      IfcCurtainWall:[0.29,0.67,0.79,0.35],IfcPlate:[0.68,0.68,0.68,1],
+      IfcCovering:[0.67,0.65,0.63,1],IfcFurnishingElement:[0.64,0.64,0.64,1],
+      IfcFlowTerminal:[0.44,0.50,0.56,1],IfcSpace:[0.38,0.68,0.82,0.12],
+      IfcBuildingElementProxy:[0.55,0.55,0.55,1],IfcStair:[0.72,0.60,0.50,1],
+      IfcRailing:[0.50,0.50,0.55,1],IfcStairFlight:[0.72,0.60,0.50,1],
+    };
+    function applyColors() {
+      for(const [id,en] of Object.entries(viewer.scene.objects)) {
+        const m=viewer.metaScene.metaObjects[id]; if(!m) continue;
+        const c=C[m.type]; if(c) { en.colorize=c.slice(0,3); en.opacity=c[3]; }
       }
     }
 
-    else if(msg.type === 'setVisible') {
-      for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects)) {
-        if(mo.type && mo.type.toUpperCase()===msg.cls) {
-          const en=viewer.scene.objects[id];
-          if(en) en.visible=msg.visible;
+    // ── Resize ────────────────────────────────────────────────────────
+    window.addEventListener('resize', () => {
+      cv.width=window.innerWidth; cv.height=window.innerHeight;
+    });
+
+    // ── postMessage ───────────────────────────────────────────────────
+    window.addEventListener('message', function(e) {
+      const msg = e.data;
+      if(!msg || !msg.type) return;
+      
+      if(msg.type === 'loadIFC') {
+        try {
+          dbg('loadIFC empfangen: '+(msg.data?msg.data.byteLength:'null')+' bytes');
+          if(!msg.data || msg.data.byteLength===0) { sendErr('Leerer ArrayBuffer'); return; }
+          if(currentModel) { currentModel.destroy(); currentModel=null; }
+          const blob = new Blob([msg.data], {type:'application/octet-stream'});
+          const url = URL.createObjectURL(blob);
+          dbg('Blob-URL erstellt, lade Modell…');
+          currentModel = ifcLoader.load({id:'model', src:url, loadMetadata:true, objectDefaults:{}});
+          currentModel.on('loaded', () => {
+            URL.revokeObjectURL(url);
+            applyColors();
+            const n = Object.keys(viewer.scene.objects).length;
+            dbg('Modell geladen: '+n+' Objekte');
+            try { viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB()},()=>{}); } catch(fe){dbg('flyTo: '+fe);}
+            parent.postMessage({type:'loaded', count:n}, '*');
+          });
+          currentModel.on('error', err => {
+            URL.revokeObjectURL(url);
+            sendErr('IFC-Fehler: '+String(err));
+          });
+        } catch(ex) { sendErr('loadIFC: '+String(ex)); }
+      }
+      else if(msg.type==='setVisible') {
+        for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects)) {
+          if(mo.type && mo.type.toUpperCase()===msg.cls) { const en=viewer.scene.objects[id]; if(en) en.visible=msg.visible; }
         }
       }
-    }
-    else if(msg.type === 'setAllVisible') {
-      viewer.scene.setObjectsVisible(viewer.scene.objectIds, msg.visible);
-    }
-    else if(msg.type === 'isolate') {
-      viewer.scene.setObjectsVisible(viewer.scene.objectIds, false);
-      if(msg.ids && msg.ids.length) {
-        viewer.scene.setObjectsVisible(msg.ids, true);
-        try { viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB(msg.ids)},()=>{}); } catch(e){}
+      else if(msg.type==='setAllVisible') { viewer.scene.setObjectsVisible(viewer.scene.objectIds, msg.visible); }
+      else if(msg.type==='isolate') {
+        viewer.scene.setObjectsVisible(viewer.scene.objectIds, false);
+        if(msg.ids && msg.ids.length) { viewer.scene.setObjectsVisible(msg.ids, true); try{viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB(msg.ids)},()=>{});}catch(e){} }
       }
-    }
-    else if(msg.type === 'showAll') {
-      viewer.scene.setObjectsVisible(viewer.scene.objectIds, true);
-    }
-    else if(msg.type === 'fitAll') {
-      try { viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB()},()=>{}); } catch(e){}
-    }
-    else if(msg.type === 'highlight') {
+      else if(msg.type==='showAll') { viewer.scene.setObjectsVisible(viewer.scene.objectIds, true); }
+      else if(msg.type==='fitAll') { try{viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB()},()=>{});}catch(e){} }
+      else if(msg.type==='highlight') {
+        viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds, false);
+        if(msg.id) { const en=viewer.scene.objects[msg.id]; if(en) { en.highlighted=true; try{viewer.cameraFlight.flyTo({aabb:en.aabb},()=>{});}catch(e){} } }
+      }
+      else if(msg.type==='setSection') {
+        if(activeSectionPlane) { sectionPlanes.destroySectionPlane(activeSectionPlane.id); activeSectionPlane=null; }
+        if(msg.enabled) {
+          const ax={x:{dir:[-1,0,0],pos:[msg.pos||0,0,0]},y:{dir:[0,-1,0],pos:[0,msg.pos||0,0]},z:{dir:[0,0,-1],pos:[0,0,msg.pos||0]}};
+          const a=ax[msg.axis]||ax.y;
+          activeSectionPlane=sectionPlanes.createSectionPlane({id:'sp1',pos:a.pos,dir:a.dir});
+        }
+      }
+      else if(msg.type==='colorizeCls') {
+        for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects)) {
+          if(mo.type && mo.type.toUpperCase()===msg.cls) { const en=viewer.scene.objects[id]; if(en) en.colorize=msg.color; }
+        }
+      }
+      else if(msg.type==='resetColors') { applyColors(); }
+      else if(msg.type==='setBgColor') { viewer.scene.backgroundColor=msg.color||[0.91,0.92,0.94]; }
+    });
+
+    // ── Pick ──────────────────────────────────────────────────────────
+    viewer.scene.input.on('mouseclicked', (coords) => {
+      const hit = viewer.scene.pick({canvasPos:coords});
       viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds, false);
-      if(msg.id) {
-        const en=viewer.scene.objects[msg.id];
-        if(en) { en.highlighted=true; try{viewer.cameraFlight.flyTo({aabb:en.aabb},()=>{});}catch(e){} }
+      if(hit && hit.entity) {
+        hit.entity.highlighted = true;
+        const m = viewer.metaScene.metaObjects[hit.entity.id];
+        parent.postMessage({type:'picked',id:hit.entity.id,cls:m?m.type.toUpperCase():'',name:m?m.name:hit.entity.id}, '*');
+      } else {
+        parent.postMessage({type:'deselect'}, '*');
       }
-    }
-    else if(msg.type === 'setSection') {
-      if(activeSectionPlane) { sectionPlanes.destroySectionPlane(activeSectionPlane.id); activeSectionPlane=null; }
-      if(msg.enabled) {
-        const axes={x:{dir:[-1,0,0],pos:[msg.pos||0,0,0]},y:{dir:[0,-1,0],pos:[0,msg.pos||0,0]},z:{dir:[0,0,-1],pos:[0,0,msg.pos||0]}};
-        const ax=axes[msg.axis]||axes.y;
-        activeSectionPlane=sectionPlanes.createSectionPlane({id:'sp1',pos:ax.pos,dir:ax.dir});
-      }
-    }
-    else if(msg.type === 'colorizeCls') {
-      for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects)) {
-        if(mo.type && mo.type.toUpperCase()===msg.cls) {
-          const en=viewer.scene.objects[id]; if(en) en.colorize=msg.color;
-        }
-      }
-    }
-    else if(msg.type === 'resetColors') { applyDefaultColors(); }
-    else if(msg.type === 'setBgColor') { viewer.scene.backgroundColor=msg.color||[0.91,0.92,0.94]; }
-  });
+    });
 
-  // ── Pick → notify parent ───────────────────────────────────────────
-  viewer.scene.input.on('mouseclicked', (coords) => {
-    const hit = viewer.scene.pick({canvasPos:coords});
-    viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds, false);
-    if(hit && hit.entity) {
-      hit.entity.highlighted = true;
-      const meta = viewer.metaScene.metaObjects[hit.entity.id];
-      window.parent.postMessage({
-        type:'picked', id:hit.entity.id,
-        cls: meta?meta.type.toUpperCase():'',
-        name: meta?meta.name:hit.entity.id
-      }, '*');
-    } else {
-      window.parent.postMessage({type:'deselect'}, '*');
-    }
-  });
+    parent.postMessage({type:'ready'}, '*');
+    dbg('Bereit');
 
-  window.parent.postMessage({type:'ready'}, '*');
-
-} catch(initErr) {
-  sendErr('Init-Fehler: '+initErr.message);
-}
+  } catch(err) {
+    sendErr('Init: '+String(err)+(err.stack?'\n'+err.stack.split('\n').slice(0,3).join('|'):''));
+  }
+});
 </script>
 </body>
 </html>
