@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#1a1c22; }
+  #xeokit-canvas { width:100%; height:100%; }
+</style>
+</head>
+<body>
+<canvas id="xeokit-canvas"></canvas>
+<script src="https://bimxconsulting-ops.github.io/ifc-viewer/xeokit-sdk.bundle.js"></script>
+<script>
+// ─── xeokit Viewer Setup ─────────────────────────────────────────
+const { Viewer, WebIFCLoaderPlugin, DirLight, AmbientLight, 
+        SectionPlanesPlugin, BCFViewpointsPlugin } = XeokitSDK;
+
+const viewer = new Viewer({
+  canvasId: 'xeokit-canvas',
+  transparent: false,
+  backgroundColor: [0.91, 0.92, 0.94]
+});
+
+// Lighting
+new AmbientLight(viewer.scene, { color:[1,1,1], intensity:0.3 });
+new DirLight(viewer.scene, { dir:[0.8,-1.0,0.5], color:[1,1,1], intensity:0.8, space:'world' });
+new DirLight(viewer.scene, { dir:[-0.8,-0.5,-0.5], color:[0.9,0.95,1], intensity:0.4, space:'world' });
+
+// Camera defaults
+viewer.camera.eye  = [20, 15, 20];
+viewer.camera.look = [0, 0, 0];
+viewer.camera.up   = [0, 1, 0];
+viewer.camera.perspective.fov = 52;
+
+// Grid
+viewer.scene.clearLights();
+new AmbientLight(viewer.scene, { color:[1,1,1], intensity:0.3 });
+new DirLight(viewer.scene, { dir:[0.8,-1.0,0.5], color:[1,1,1], intensity:0.8, space:'world' });
+new DirLight(viewer.scene, { dir:[-0.8,-0.5,-0.5], color:[0.9,0.95,1], intensity:0.4, space:'world' });
+
+// Section planes
+const sectionPlanes = new SectionPlanesPlugin(viewer, { overviewVisible:false });
+let activeSectionPlane = null;
+
+// IFC Loader
+const ifcLoader = new WebIFCLoaderPlugin(viewer, {
+  wasmPath: 'https://bimxconsulting-ops.github.io/ifc-viewer/'
+});
+
+let currentModel = null;
+
+// ─── IFC type colors (BIM standard palette) ─────────────────────
+const IFC_COLORS = {
+  IfcWall:                 [0.82, 0.80, 0.73, 1.0],
+  IfcWallStandardCase:     [0.82, 0.80, 0.73, 1.0],
+  IfcSlab:                 [0.69, 0.75, 0.82, 1.0],
+  IfcRoof:                 [0.71, 0.63, 0.58, 1.0],
+  IfcColumn:               [0.84, 0.68, 0.30, 1.0],
+  IfcBeam:                 [0.74, 0.58, 0.22, 1.0],
+  IfcMember:               [0.70, 0.48, 0.25, 1.0],
+  IfcDoor:                 [0.62, 0.50, 0.33, 1.0],
+  IfcWindow:               [0.38, 0.68, 0.82, 0.4],
+  IfcWindowStandardCase:   [0.38, 0.68, 0.82, 0.4],
+  IfcCurtainWall:          [0.29, 0.67, 0.79, 0.35],
+  IfcPlate:                [0.68, 0.68, 0.68, 1.0],
+  IfcCovering:             [0.67, 0.65, 0.63, 1.0],
+  IfcFurnishingElement:    [0.64, 0.64, 0.64, 1.0],
+  IfcFlowTerminal:         [0.44, 0.50, 0.56, 1.0],
+  IfcSpace:                [0.38, 0.68, 0.82, 0.12],
+  IfcBuildingElementProxy: [0.55, 0.55, 0.55, 1.0],
+};
+
+// ─── Apply default colors after load ────────────────────────────
+function applyDefaultColors(model) {
+  const objects = viewer.scene.objects;
+  for(const [id, entity] of Object.entries(objects)) {
+    const meta = viewer.metaScene.metaObjects[id];
+    if(!meta) continue;
+    const type = meta.type; // e.g. "IfcWall"
+    const col = IFC_COLORS[type];
+    if(col) {
+      entity.colorize = col.slice(0,3);
+      entity.opacity = col[3];
+    }
+  }
+}
+
+// ─── Communication with parent app ──────────────────────────────
+window.addEventListener('message', function(e) {
+  const msg = e.data;
+  if(!msg || !msg.type) return;
+
+  if(msg.type === 'loadIFC') {
+    if(currentModel) {
+      currentModel.destroy();
+      currentModel = null;
+    }
+    // Convert ArrayBuffer to blob URL for xeokit
+    const blob = new Blob([msg.data], {type:'application/octet-stream'});
+    const url  = URL.createObjectURL(blob);
+
+    currentModel = ifcLoader.load({
+      id: 'model',
+      src: url,
+      loadMetadata: true,
+      objectDefaults: {} // We apply colors ourselves
+    });
+
+    currentModel.on('loaded', () => {
+      URL.revokeObjectURL(url);
+      applyDefaultColors(currentModel);
+
+      // Collect element info to send back
+      const elements = [];
+      const metaModel = viewer.metaScene.metaModels['model'];
+      if(metaModel) {
+        for(const [id, mo] of Object.entries(viewer.metaScene.metaObjects)) {
+          if(mo.metaModel && mo.metaModel.id === 'model' && mo.type !== 'IfcProject' 
+             && mo.type !== 'IfcSite' && mo.type !== 'IfcBuilding') {
+            elements.push({ id:mo.id, cls:mo.type.toUpperCase(), name:mo.name });
+          }
+        }
+      }
+
+      // Fit view
+      viewer.cameraFlight.flyTo({ aabb: viewer.scene.getAABB() }, () => {});
+
+      // Send element list to parent
+      window.parent.postMessage({
+        type: 'loaded',
+        count: elements.length,
+        elements: elements
+      }, '*');
+    });
+
+    currentModel.on('error', (e) => {
+      console.error('xeokit load error:', e);
+      window.parent.postMessage({ type:'error', msg:String(e) }, '*');
+    });
+  }
+
+  else if(msg.type === 'setVisible') {
+    // msg.cls = 'IFCWALL', msg.visible = true/false
+    const type = msg.cls.charAt(0) + msg.cls.slice(1).toLowerCase(); // IFCWALL → Ifcwall
+    // Better: find actual type name by searching metaObjects
+    for(const [id, mo] of Object.entries(viewer.metaScene.metaObjects)) {
+      if(mo.type && mo.type.toUpperCase() === msg.cls) {
+        const entity = viewer.scene.objects[id];
+        if(entity) entity.visible = msg.visible;
+      }
+    }
+  }
+
+  else if(msg.type === 'setAllVisible') {
+    viewer.scene.setObjectsVisible(viewer.scene.objectIds, msg.visible);
+  }
+
+  else if(msg.type === 'isolate') {
+    // Hide all, show only given ids
+    viewer.scene.setObjectsVisible(viewer.scene.objectIds, false);
+    if(msg.ids && msg.ids.length) {
+      viewer.scene.setObjectsVisible(msg.ids, true);
+      viewer.cameraFlight.flyTo({ aabb: viewer.scene.getAABB(msg.ids) }, ()=>{});
+    }
+  }
+
+  else if(msg.type === 'showAll') {
+    viewer.scene.setObjectsVisible(viewer.scene.objectIds, true);
+  }
+
+  else if(msg.type === 'fitAll') {
+    viewer.cameraFlight.flyTo({ aabb: viewer.scene.getAABB() }, ()=>{});
+  }
+
+  else if(msg.type === 'highlight') {
+    // Reset all highlights
+    viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds, false);
+    if(msg.id) {
+      const entity = viewer.scene.objects[msg.id];
+      if(entity) {
+        entity.highlighted = true;
+        viewer.cameraFlight.flyTo({ aabb: entity.aabb }, ()=>{});
+      }
+    }
+  }
+
+  else if(msg.type === 'setSection') {
+    if(activeSectionPlane) {
+      sectionPlanes.destroySectionPlane(activeSectionPlane.id);
+      activeSectionPlane = null;
+    }
+    if(msg.enabled) {
+      const axes = {
+        x: { dir:[-1,0,0], pos:[msg.pos||0, 0, 0] },
+        y: { dir:[0,-1,0],  pos:[0, msg.pos||0, 0] },
+        z: { dir:[0,0,-1],  pos:[0, 0, msg.pos||0] },
+      };
+      const ax = axes[msg.axis] || axes.y;
+      activeSectionPlane = sectionPlanes.createSectionPlane({
+        id: 'sp1',
+        pos: ax.pos,
+        dir: ax.dir
+      });
+    }
+  }
+
+  else if(msg.type === 'colorizeCls') {
+    // msg.cls, msg.color = [r,g,b] 0-1
+    for(const [id, mo] of Object.entries(viewer.metaScene.metaObjects)) {
+      if(mo.type && mo.type.toUpperCase() === msg.cls) {
+        const entity = viewer.scene.objects[id];
+        if(entity) entity.colorize = msg.color;
+      }
+    }
+  }
+
+  else if(msg.type === 'resetColors') {
+    applyDefaultColors();
+  }
+
+  else if(msg.type === 'setBgColor') {
+    viewer.scene.backgroundColor = msg.color || [0.91,0.92,0.94];
+  }
+});
+
+// ─── Click / Pick → notify parent ────────────────────────────────
+viewer.scene.input.on('mouseclicked', (coords) => {
+  const pickResult = viewer.scene.pick({ canvasPos: coords });
+  if(pickResult && pickResult.entity) {
+    const id = pickResult.entity.id;
+    // Reset previous
+    viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds, false);
+    pickResult.entity.highlighted = true;
+
+    const meta = viewer.metaScene.metaObjects[id];
+    window.parent.postMessage({
+      type: 'picked',
+      id: id,
+      cls: meta ? meta.type.toUpperCase() : '',
+      name: meta ? meta.name : id
+    }, '*');
+  } else {
+    viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds, false);
+    window.parent.postMessage({ type: 'deselect' }, '*');
+  }
+});
+
+// Ready signal
+window.parent.postMessage({ type:'ready' }, '*');
+</script>
+</body>
+</html>
