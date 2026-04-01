@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#eaecef; }
+#cv { width:100%; height:100%; display:block; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script src="https://bimxconsulting-ops.github.io/ifc-viewer/xeokit-sdk.bundle.js"></script>
+<script src="https://bimxconsulting-ops.github.io/ifc-viewer/web-ifc-browser.js"></script>
+<script>
+function p(msg) { parent.postMessage({type:'viewerLog',msg:String(msg)},'*'); }
+function err(msg) { parent.postMessage({type:'error',msg:String(msg)},'*'); }
+
+window.addEventListener('load', async function() {
+  try {
+    if(typeof XeokitSDK==='undefined') { err('xeokit Bundle fehlt'); return; }
+    if(typeof WebIFC==='undefined') { err('web-ifc nicht geladen'); return; }
+
+    const {Viewer,WebIFCLoaderPlugin,DirLight,AmbientLight,SectionPlanesPlugin} = XeokitSDK;
+
+    const IfcAPI = new WebIFC.IfcAPI();
+    IfcAPI.SetWasmPath('https://bimxconsulting-ops.github.io/ifc-viewer/');
+    await IfcAPI.Init();
+    p('web-ifc OK');
+
+    const viewer = new Viewer({
+      canvasId: 'cv',
+      transparent: false,
+      backgroundColor: [0.91, 0.92, 0.94]
+    });
+    viewer.scene.clearLights();
+    new AmbientLight(viewer.scene, {color:[1,1,1], intensity:0.35});
+    new DirLight(viewer.scene, {dir:[0.8,-1.0,0.5], color:[1,1,1], intensity:0.8, space:'world'});
+    new DirLight(viewer.scene, {dir:[-0.8,-0.5,-0.5], color:[0.9,0.95,1], intensity:0.4, space:'world'});
+    viewer.camera.perspective.fov = 52;
+
+    const sectionPlanes = new SectionPlanesPlugin(viewer, {overviewVisible:false});
+    let activeSectionPlane = null;
+
+    const ifcLoader = new WebIFCLoaderPlugin(viewer, {
+      WebIFC: WebIFC,
+      IfcAPI: IfcAPI
+    });
+    p('Loader OK');
+
+    let currentModel = null;
+
+    const C = {
+      IfcWall:[0.82,0.80,0.73,1],IfcWallStandardCase:[0.82,0.80,0.73,1],
+      IfcSlab:[0.69,0.75,0.82,1],IfcRoof:[0.71,0.63,0.58,1],
+      IfcColumn:[0.84,0.68,0.30,1],IfcBeam:[0.74,0.58,0.22,1],
+      IfcMember:[0.70,0.48,0.25,1],IfcDoor:[0.62,0.50,0.33,1],
+      IfcWindow:[0.38,0.68,0.82,0.4],IfcWindowStandardCase:[0.38,0.68,0.82,0.4],
+      IfcCurtainWall:[0.29,0.67,0.79,0.35],IfcPlate:[0.68,0.68,0.68,1],
+      IfcCovering:[0.67,0.65,0.63,1],IfcFurnishingElement:[0.64,0.64,0.64,1],
+      IfcFlowTerminal:[0.44,0.50,0.56,1],IfcSpace:[0.38,0.68,0.82,0.12],
+      IfcBuildingElementProxy:[0.55,0.55,0.55,1],IfcStair:[0.72,0.60,0.50,1],
+      IfcRailing:[0.50,0.50,0.55,1],IfcStairFlight:[0.72,0.60,0.50,1],
+    };
+    function applyColors() {
+      for(const [id,en] of Object.entries(viewer.scene.objects)) {
+        const m=viewer.metaScene.metaObjects[id]; if(!m) continue;
+        const c=C[m.type]; if(c) {en.colorize=c.slice(0,3); en.opacity=c[3];}
+      }
+    }
+
+    window.addEventListener('message', function(e) {
+      const msg=e.data; if(!msg||!msg.type) return;
+
+      if(msg.type==='loadIFC') {
+        try {
+          if(!msg.data||msg.data.byteLength===0) {err('Leerer ArrayBuffer');return;}
+          p('Lade '+msg.data.byteLength+' bytes');
+          if(currentModel) {currentModel.destroy();currentModel=null;}
+          const blob=new Blob([msg.data],{type:'application/octet-stream'});
+          const url=URL.createObjectURL(blob);
+          currentModel=ifcLoader.load({id:'model',src:url,loadMetadata:true,objectDefaults:{}});
+          currentModel.on('loaded',()=>{
+            URL.revokeObjectURL(url);
+            applyColors();
+            const n=Object.keys(viewer.scene.objects).length;
+            p('Geladen: '+n);
+            try{viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB()},()=>{});}catch(fe){}
+            parent.postMessage({type:'loaded',count:n},'*');
+          });
+          currentModel.on('error',e2=>{URL.revokeObjectURL(url);err('IFC: '+String(e2));});
+        } catch(ex) {err('loadIFC: '+String(ex));}
+      }
+      else if(msg.type==='setVisible') {
+        for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects))
+          if(mo.type&&mo.type.toUpperCase()===msg.cls) {const en=viewer.scene.objects[id];if(en)en.visible=msg.visible;}
+      }
+      else if(msg.type==='setAllVisible') {viewer.scene.setObjectsVisible(viewer.scene.objectIds,msg.visible);}
+      else if(msg.type==='isolate') {
+        viewer.scene.setObjectsVisible(viewer.scene.objectIds,false);
+        if(msg.ids&&msg.ids.length){viewer.scene.setObjectsVisible(msg.ids,true);try{viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB(msg.ids)},()=>{});}catch(e){}}
+      }
+      else if(msg.type==='showAll') {viewer.scene.setObjectsVisible(viewer.scene.objectIds,true);}
+      else if(msg.type==='fitAll') {try{viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB()},()=>{});}catch(e){}}
+      else if(msg.type==='highlight') {
+        viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds,false);
+        if(msg.id){const en=viewer.scene.objects[msg.id];if(en){en.highlighted=true;try{viewer.cameraFlight.flyTo({aabb:en.aabb},()=>{});}catch(e){}}}
+      }
+      else if(msg.type==='setSection') {
+        if(activeSectionPlane){sectionPlanes.destroySectionPlane(activeSectionPlane.id);activeSectionPlane=null;}
+        if(msg.enabled){
+          const ax={x:{dir:[-1,0,0],pos:[msg.pos||0,0,0]},y:{dir:[0,-1,0],pos:[0,msg.pos||0,0]},z:{dir:[0,0,-1],pos:[0,0,msg.pos||0]}};
+          const a=ax[msg.axis]||ax.y;
+          activeSectionPlane=sectionPlanes.createSectionPlane({id:'sp1',pos:a.pos,dir:a.dir});
+        }
+      }
+      else if(msg.type==='colorizeCls') {
+        for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects))
+          if(mo.type&&mo.type.toUpperCase()===msg.cls){const en=viewer.scene.objects[id];if(en)en.colorize=msg.color;}
+      }
+      else if(msg.type==='resetColors') {applyColors();}
+      else if(msg.type==='setBgColor') {viewer.scene.backgroundColor=msg.color||[0.91,0.92,0.94];}
+    });
+
+    viewer.scene.input.on('mouseclicked',(coords)=>{
+      const hit=viewer.scene.pick({canvasPos:coords});
+      viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds,false);
+      if(hit&&hit.entity){
+        hit.entity.highlighted=true;
+        const m=viewer.metaScene.metaObjects[hit.entity.id];
+        parent.postMessage({type:'picked',id:hit.entity.id,cls:m?m.type.toUpperCase():'',name:m?m.name:hit.entity.id},'*');
+      } else {parent.postMessage({type:'deselect'},'*');}
+    });
+
+    parent.postMessage({type:'ready'},'*');
+
+  } catch(ex) {
+    err('Init: '+String(ex));
+  }
+});
+</script>
+</body>
+</html>
