@@ -10,47 +10,44 @@ html, body { width:100%; height:100%; overflow:hidden; background:#eaecef; }
 </head>
 <body>
 <canvas id="cv"></canvas>
-<script src="https://bimxconsulting-ops.github.io/ifc-viewer/xeokit-sdk.bundle.js"></script>
-<script src="https://bimxconsulting-ops.github.io/ifc-viewer/web-ifc-browser.js"></script>
 <script>
-function p(msg) { parent.postMessage({type:'viewerLog',msg:String(msg)},'*'); }
-function err(msg) { parent.postMessage({type:'error',msg:String(msg)},'*'); }
-
+function p(msg) { try{parent.postMessage({type:'viewerLog',msg:String(msg)},'*');}catch(e){} }
+function err(msg) { try{parent.postMessage({type:'error',msg:String(msg)},'*');}catch(e){} }
+</script>
+<script src="https://bimxconsulting-ops.github.io/ifc-viewer/xeokit-sdk.bundle.js" onload="p('xeokit OK')" onerror="err('xeokit 404')"></script>
+<script src="https://bimxconsulting-ops.github.io/ifc-viewer/web-ifc-browser.js" onload="p('web-ifc OK')" onerror="err('web-ifc 404')"></script>
+<script>
 window.addEventListener('load', async function() {
+  p('XeokitSDK:'+(typeof XeokitSDK)+' WebIFC:'+(typeof WebIFC));
   try {
-    if(typeof XeokitSDK==='undefined') { err('xeokit Bundle fehlt'); return; }
-    if(typeof WebIFC==='undefined') { err('web-ifc nicht geladen'); return; }
+    if(typeof XeokitSDK==='undefined'){err('xeokit nicht geladen');return;}
+    if(typeof WebIFC==='undefined'){err('web-ifc nicht geladen');return;}
+    if(typeof WebIFC.IfcAPI!=='function'){err('WebIFC.IfcAPI fehlt, keys:'+Object.keys(WebIFC).slice(0,8).join(','));return;}
 
     const {Viewer,WebIFCLoaderPlugin,DirLight,AmbientLight,SectionPlanesPlugin} = XeokitSDK;
 
     const IfcAPI = new WebIFC.IfcAPI();
-    IfcAPI.SetWasmPath('https://bimxconsulting-ops.github.io/ifc-viewer/');
+    IfcAPI.SetWasmPath('https://bimxconsulting-ops.github.io/ifc-viewer/', true);
     await IfcAPI.Init();
-    p('web-ifc OK');
+    p('IfcAPI OK');
 
-    const viewer = new Viewer({
-      canvasId: 'cv',
-      transparent: false,
-      backgroundColor: [0.91, 0.92, 0.94]
-    });
+    const viewer = new Viewer({canvasId:'cv', transparent:false, backgroundColor:[0.91,0.92,0.94]});
     viewer.scene.clearLights();
     new AmbientLight(viewer.scene, {color:[1,1,1], intensity:0.35});
     new DirLight(viewer.scene, {dir:[0.8,-1.0,0.5], color:[1,1,1], intensity:0.8, space:'world'});
     new DirLight(viewer.scene, {dir:[-0.8,-0.5,-0.5], color:[0.9,0.95,1], intensity:0.4, space:'world'});
     viewer.camera.perspective.fov = 52;
+    p('Viewer OK');
 
     const sectionPlanes = new SectionPlanesPlugin(viewer, {overviewVisible:false});
     let activeSectionPlane = null;
 
-    const ifcLoader = new WebIFCLoaderPlugin(viewer, {
-      WebIFC: WebIFC,
-      IfcAPI: IfcAPI
-    });
+    const ifcLoader = new WebIFCLoaderPlugin(viewer, {WebIFC:WebIFC, IfcAPI:IfcAPI});
     p('Loader OK');
 
     let currentModel = null;
 
-    const C = {
+    const CLR = {
       IfcWall:[0.82,0.80,0.73,1],IfcWallStandardCase:[0.82,0.80,0.73,1],
       IfcSlab:[0.69,0.75,0.82,1],IfcRoof:[0.71,0.63,0.58,1],
       IfcColumn:[0.84,0.68,0.30,1],IfcBeam:[0.74,0.58,0.22,1],
@@ -65,35 +62,31 @@ window.addEventListener('load', async function() {
     function applyColors() {
       for(const [id,en] of Object.entries(viewer.scene.objects)) {
         const m=viewer.metaScene.metaObjects[id]; if(!m) continue;
-        const c=C[m.type]; if(c) {en.colorize=c.slice(0,3); en.opacity=c[3];}
+        const c=CLR[m.type]; if(c){en.colorize=c.slice(0,3);en.opacity=c[3];}
       }
     }
 
     window.addEventListener('message', function(e) {
       const msg=e.data; if(!msg||!msg.type) return;
-
       if(msg.type==='loadIFC') {
         try {
-          if(!msg.data||msg.data.byteLength===0) {err('Leerer ArrayBuffer');return;}
-          p('Lade '+msg.data.byteLength+' bytes');
-          if(currentModel) {currentModel.destroy();currentModel=null;}
-          const blob=new Blob([msg.data],{type:'application/octet-stream'});
-          const url=URL.createObjectURL(blob);
-          currentModel=ifcLoader.load({id:'model',src:url,loadMetadata:true,objectDefaults:{}});
+          if(!msg.data||msg.data.byteLength===0){err('Leerer Buffer');return;}
+          p('Lade IFC: '+msg.data.byteLength+' bytes');
+          if(currentModel){currentModel.destroy();currentModel=null;}
+          currentModel=ifcLoader.load({id:'model',ifc:msg.data,loadMetadata:false,objectDefaults:{}});
           currentModel.on('loaded',()=>{
-            URL.revokeObjectURL(url);
             applyColors();
             const n=Object.keys(viewer.scene.objects).length;
-            p('Geladen: '+n);
+            p('Geladen: '+n+' Objekte');
             try{viewer.cameraFlight.flyTo({aabb:viewer.scene.getAABB()},()=>{});}catch(fe){}
             parent.postMessage({type:'loaded',count:n},'*');
           });
           currentModel.on('error',e2=>{URL.revokeObjectURL(url);err('IFC: '+String(e2));});
-        } catch(ex) {err('loadIFC: '+String(ex));}
+        }catch(ex){err('loadIFC: '+String(ex));}
       }
       else if(msg.type==='setVisible') {
         for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects))
-          if(mo.type&&mo.type.toUpperCase()===msg.cls) {const en=viewer.scene.objects[id];if(en)en.visible=msg.visible;}
+          if(mo.type&&mo.type.toUpperCase()===msg.cls){const en=viewer.scene.objects[id];if(en)en.visible=msg.visible;}
       }
       else if(msg.type==='setAllVisible') {viewer.scene.setObjectsVisible(viewer.scene.objectIds,msg.visible);}
       else if(msg.type==='isolate') {
@@ -109,7 +102,17 @@ window.addEventListener('load', async function() {
       else if(msg.type==='setSection') {
         if(activeSectionPlane){sectionPlanes.destroySectionPlane(activeSectionPlane.id);activeSectionPlane=null;}
         if(msg.enabled){
-          const ax={x:{dir:[-1,0,0],pos:[msg.pos||0,0,0]},y:{dir:[0,-1,0],pos:[0,msg.pos||0,0]},z:{dir:[0,0,-1],pos:[0,0,msg.pos||0]}};
+          let pos = msg.pos || 0;
+          if(msg.normalized) {
+            // Convert 0-1 to world coords using scene AABB
+            try {
+              const aabb = viewer.scene.getAABB();
+              if(msg.axis==='x') pos = aabb[0] + pos*(aabb[3]-aabb[0]);
+              else if(msg.axis==='y') pos = aabb[1] + pos*(aabb[4]-aabb[1]);
+              else pos = aabb[2] + pos*(aabb[5]-aabb[2]);
+            } catch(e) {}
+          }
+          const ax={x:{dir:[-1,0,0],pos:[pos,0,0]},y:{dir:[0,-1,0],pos:[0,pos,0]},z:{dir:[0,0,-1],pos:[0,0,pos]}};
           const a=ax[msg.axis]||ax.y;
           activeSectionPlane=sectionPlanes.createSectionPlane({id:'sp1',pos:a.pos,dir:a.dir});
         }
@@ -119,7 +122,63 @@ window.addEventListener('load', async function() {
           if(mo.type&&mo.type.toUpperCase()===msg.cls){const en=viewer.scene.objects[id];if(en)en.colorize=msg.color;}
       }
       else if(msg.type==='resetColors') {applyColors();}
+      else if(msg.type==='setIdsVisible') {
+        if(msg.ids && msg.ids.length) viewer.scene.setObjectsVisible(msg.ids, msg.visible);
+      }
+      else if(msg.type==='colorizeAll') {
+        for(const en of Object.values(viewer.scene.objects)) en.colorize=msg.color;
+      }
+      else if(msg.type==='colorizeId') {
+        const en=viewer.scene.objects[msg.id]; if(en) en.colorize=msg.color;
+      }
+      else if(msg.type==='colorizeByStorey') {
+        // msg.map: {storeyName: [r,g,b]}
+        for(const [id,mo] of Object.entries(viewer.metaScene.metaObjects)) {
+          if(!mo.type) continue;
+          // Find storey name from meta hierarchy
+          let storeyName = null;
+          let parent = mo.parent;
+          while(parent) {
+            if(parent.type==='IfcBuildingStorey'){storeyName=parent.name;break;}
+            parent=parent.parent;
+          }
+          if(storeyName && msg.map[storeyName]) {
+            const en=viewer.scene.objects[id]; if(en) en.colorize=msg.map[storeyName];
+          }
+        }
+      }
       else if(msg.type==='setBgColor') {viewer.scene.backgroundColor=msg.color||[0.91,0.92,0.94];}
+      else if(msg.type==='setCamera') {
+        viewer.camera.projection = msg.ortho ? 'ortho' : 'perspective';
+      }
+      else if(msg.type==='setCamPreset') {
+        const aabb = viewer.scene.getAABB();
+        const c = [(aabb[0]+aabb[3])/2,(aabb[1]+aabb[4])/2,(aabb[2]+aabb[5])/2];
+        const d = Math.max(aabb[3]-aabb[0], aabb[4]-aabb[1], aabb[5]-aabb[2]);
+        const presets = {
+          top:   {eye:[c[0],c[1]+d*1.5,c[2]], look:c, up:[0,0,-1]},
+          front: {eye:[c[0],c[1],c[2]+d*1.5], look:c, up:[0,1,0]},
+          right: {eye:[c[0]+d*1.5,c[1],c[2]], look:c, up:[0,1,0]},
+          iso:   {eye:[c[0]+d,c[1]+d*0.8,c[2]+d], look:c, up:[0,1,0]},
+        };
+        const p = presets[msg.preset] || presets.iso;
+        viewer.cameraFlight.flyTo({eye:p.eye, look:p.look, up:p.up});
+      }
+      else if(msg.type==='setEdges') {
+        viewer.scene.edgeMaterial.edges = msg.visible;
+      }
+      else if(msg.type==='setGrid') {
+        // xeokit doesn't have built-in grid, skip silently
+      }
+      else if(msg.type==='hideId') {
+        const en=viewer.scene.objects[msg.id]; if(en) en.visible=false;
+      }
+      else if(msg.type==='isolateLast') {
+        if(window._lastHit) {
+          viewer.scene.setObjectsVisible(viewer.scene.objectIds, false);
+          const en=viewer.scene.objects[window._lastHit]; if(en) en.visible=true;
+        }
+      }
     });
 
     viewer.scene.input.on('mouseclicked',(coords)=>{
@@ -127,14 +186,16 @@ window.addEventListener('load', async function() {
       viewer.scene.setObjectsHighlighted(viewer.scene.highlightedObjectIds,false);
       if(hit&&hit.entity){
         hit.entity.highlighted=true;
+        window._lastHit=hit.entity.id;
         const m=viewer.metaScene.metaObjects[hit.entity.id];
         parent.postMessage({type:'picked',id:hit.entity.id,cls:m?m.type.toUpperCase():'',name:m?m.name:hit.entity.id},'*');
-      } else {parent.postMessage({type:'deselect'},'*');}
+      }else{parent.postMessage({type:'deselect'},'*');window._lastHit=null;}
     });
 
     parent.postMessage({type:'ready'},'*');
+    p('Bereit');
 
-  } catch(ex) {
+  }catch(ex){
     err('Init: '+String(ex));
   }
 });
